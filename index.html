@@ -1,1 +1,307 @@
-t
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流逝：資料庫除錯後台 (Debug Mode)</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Serif+TC:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --panel-bg: #252525;
+            --text-main: #e0e0e0;
+            --text-muted: #888;
+            --accent: #ffb74d; /* 改成橘色以示除錯模式 */
+            --valid: #66bb6a;
+            --invalid: #ef5350;
+            --border: #333;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace;
+            margin: 0; padding: 20px;
+            display: flex; flex-direction: column; align-items: center;
+        }
+
+        .container {
+            width: 100%; max-width: 900px;
+            background: var(--panel-bg);
+            padding: 30px; border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+        }
+
+        /* Debug Logger */
+        #debug-panel {
+            width: 100%; max-width: 900px;
+            background: #000; color: #0f0;
+            padding: 20px; border-radius: 8px;
+            font-size: 12px; font-family: monospace;
+            border: 1px solid #333;
+            height: 200px; overflow-y: scroll;
+            margin-bottom: 20px;
+            white-space: pre-wrap;
+        }
+
+        /* Raw Data Area */
+        #raw-data-area {
+            width: 100%; height: 100px;
+            background: #111; color: #aaa;
+            border: 1px solid #333;
+            margin-bottom: 20px;
+            font-family: monospace; font-size: 11px;
+            padding: 10px; box-sizing: border-box;
+            resize: vertical;
+        }
+
+        header {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 20px;
+        }
+        h1 { margin: 0; font-size: 24px; color: var(--accent); font-family: 'Noto Serif TC', serif; letter-spacing: 2px; }
+        .stats { font-size: 13px; color: var(--text-muted); text-align: right; }
+        .stats span { color: #fff; font-weight: bold; margin-left: 5px; }
+
+        .toolbar { display: flex; gap: 10px; margin-bottom: 20px; }
+        button {
+            padding: 8px 16px; border: 1px solid var(--border); background: #333;
+            color: #fff; cursor: pointer; border-radius: 4px; font-family: inherit;
+            transition: 0.2s; font-size: 13px;
+        }
+        button:hover { background: #444; border-color: #666; }
+        button.primary { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: bold; }
+
+        .table-container { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th { text-align: left; padding: 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: normal; }
+        td { padding: 12px; border-bottom: 1px solid var(--border); }
+        tr:hover { background: rgba(255,255,255,0.02); }
+
+        .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .valid { background-color: var(--valid); box-shadow: 0 0 5px var(--valid); }
+        .invalid { background-color: var(--invalid); box-shadow: 0 0 5px var(--invalid); }
+        .row-invalid { color: var(--invalid); opacity: 0.7; text-decoration: line-through; }
+    </style>
+</head>
+<body>
+
+<div id="debug-panel">Waiting for action...</div>
+
+<div class="container">
+    <header>
+        <div>
+            <h1>流逝：資料庫視圖 (Debug)</h1>
+            <small style="color:#666">PANTRY CLOUD / RAW DATA VIEWER</small>
+        </div>
+        <div class="stats">
+            <div>全球遊玩總次數 <span id="globalCount">--</span></div>
+            <div>總紀錄筆數 <span id="recordCount">--</span></div>
+        </div>
+    </header>
+
+    <details>
+        <summary style="cursor:pointer; color:#888; margin-bottom:10px;">查看原始 JSON 資料 (Raw Response)</summary>
+        <textarea id="raw-data-area" readonly>No data loaded yet.</textarea>
+    </details>
+
+    <div class="toolbar">
+        <button onclick="loadData()" class="primary">↻ 強制重整</button>
+        <button onclick="exportCSV()">⬇ 匯出 CSV</button>
+    </div>
+
+    <div class="table-container">
+        <table id="dataTable">
+            <thead>
+                <tr>
+                    <th width="80">排名</th>
+                    <th width="100">狀態</th>
+                    <th>玩家名稱</th>
+                    <th>存活時間 (秒)</th>
+                    <th>紀錄時間</th>
+                    <th width="150" style="font-family: monospace; font-size: 12px; color: #555;">Hash Check</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody">
+                </tbody>
+        </table>
+        <div id="loading" style="text-align:center; padding:20px; color:#888; display:none;">讀取中...</div>
+    </div>
+</div>
+
+<script>
+    const PANTRY_ID = "3b037575-e357-4684-9646-47f5b3ff2ee7"; 
+    const BASKET_NAME = "Rank_v1"; 
+    const PROXY_BASE = "https://corsproxy.io/?";
+    const TARGET_URL = `https://getpantry.cloud/apiv1/pantry/${PANTRY_ID}/basket/${BASKET_NAME}`;
+    const SECRET_SALT = "TheFlow_Survival_2025_HellMode_Secured";
+
+    let currentData = [];
+
+    // === 記錄器函式 ===
+    function log(msg) {
+        const panel = document.getElementById('debug-panel');
+        const time = new Date().toLocaleTimeString();
+        panel.innerHTML = `[${time}] ${msg}\n` + panel.innerHTML;
+        console.log(`[Debug] ${msg}`);
+    }
+
+    function generateSignature(name, score) {
+        const scoreStr = parseFloat(score).toFixed(2);
+        const raw = name + "_" + scoreStr + "_" + SECRET_SALT;
+        let hash = 0;
+        for (let i = 0; i < raw.length; i++) {
+            const char = raw.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash;
+        }
+        return hash.toString(16);
+    }
+
+    function loadData() {
+        const tbody = document.getElementById('tableBody');
+        const loading = document.getElementById('loading');
+        const rawArea = document.getElementById('raw-data-area');
+        
+        tbody.innerHTML = '';
+        loading.style.display = 'block';
+        log("開始連線...");
+        log("目標 URL: " + TARGET_URL);
+
+        // 加上時間戳記避開快取
+        const bustedUrl = PROXY_BASE + encodeURIComponent(TARGET_URL + `?_t=${Date.now()}`);
+
+        fetch(bustedUrl)
+            .then(res => {
+                log(`HTTP 狀態碼: ${res.status}`);
+                if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+                return res.text(); // 先讀成文字，以免 JSON 解析失敗
+            })
+            .then(text => {
+                loading.style.display = 'none';
+                rawArea.value = text; // 顯示原始資料
+                log("收到資料，長度: " + text.length + " 字元");
+                
+                try {
+                    const data = JSON.parse(text);
+                    log("JSON 解析成功");
+                    processData(data);
+                } catch (e) {
+                    log("JSON 解析失敗: " + e.message);
+                    tbody.innerHTML = `<tr><td colspan="6" style="color:red; text-align:center;">資料格式錯誤 (非 JSON)</td></tr>`;
+                }
+            })
+            .catch(err => {
+                loading.style.display = 'none';
+                log("發生錯誤: " + err.message);
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color: #ef5350; padding: 30px;">
+                    讀取失敗: ${err.message}<br>
+                    <small>如果顯示 429 Error，代表請求太頻繁，請等 1 分鐘後再試。</small><br>
+                    <small>如果是 Failed to fetch，代表 Proxy 被瀏覽器擋住了。</small>
+                </td></tr>`;
+            });
+    }
+
+    function processData(data) {
+        let scores = [];
+        let globalCount = 0;
+
+        // === 關鍵修正：相容性處理 ===
+        if (Array.isArray(data)) {
+            log("資料格式識別：舊版 Array (無全域計數)");
+            scores = data;
+            globalCount = "N/A";
+        } else if (typeof data === 'object' && data !== null) {
+            log("資料格式識別：新版 Object (含全域計數)");
+            scores = data.scores || [];
+            globalCount = data.global_play_count || 0;
+        } else {
+            log("警告：資料格式無法識別 (Unknown)");
+        }
+
+        // 更新統計數據
+        document.getElementById('globalCount').innerText = globalCount;
+        document.getElementById('recordCount').innerText = scores.length;
+        
+        // 排序
+        scores.sort((a, b) => b.score - a.score);
+        currentData = scores;
+
+        const tbody = document.getElementById('tableBody');
+
+        if (scores.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 30px;">資料庫目前是空的 (Empty Array)。</td></tr>`;
+            log("解析完成：無任何分數紀錄");
+            return;
+        }
+
+        log(`解析完成：準備渲染 ${scores.length} 筆資料`);
+
+        scores.forEach((entry, index) => {
+            const expectedSig = generateSignature(entry.name, entry.score);
+            const isValid = entry.signature && entry.signature === expectedSig;
+            
+            // 處理日期 (舊資料可能沒有 date 欄位)
+            let dateStr = 'Unknown';
+            if (entry.date) {
+                const dateObj = new Date(entry.date);
+                dateStr = `${dateObj.getFullYear()}/${(dateObj.getMonth()+1).toString().padStart(2,'0')}/${dateObj.getDate().toString().padStart(2,'0')} ${dateObj.getHours().toString().padStart(2,'0')}:${dateObj.getMinutes().toString().padStart(2,'0')}`;
+            }
+
+            const tr = document.createElement('tr');
+            if (!isValid) tr.className = 'row-invalid';
+
+            tr.innerHTML = `
+                <td><span style="color: #ffb74d; font-weight:bold;">#${index + 1}</span></td>
+                <td>
+                    <span class="status-dot ${isValid ? 'valid' : 'invalid'}"></span>
+                    ${isValid ? 'Verified' : 'Invalid'}
+                </td>
+                <td style="font-weight:bold; color: #fff;">${sanitize(entry.name)}</td>
+                <td style="font-family: 'JetBrains Mono'; font-size: 15px;">${parseFloat(entry.score).toFixed(4)} s</td>
+                <td style="color: #888;">${dateStr}</td>
+                <td style="font-family: monospace; font-size: 11px; color: #444;">
+                    ${entry.signature ? entry.signature.substring(0, 8) + '...' : 'Missing'}
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function sanitize(str) {
+        if (!str) return '';
+        const div = document.createElement('div');
+        div.innerText = str;
+        return div.innerHTML;
+    }
+
+    function exportCSV() {
+        if (!currentData || currentData.length === 0) {
+            alert("沒有資料可以匯出");
+            return;
+        }
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
+        csvContent += "Rank,Name,Score,Date,Signature,Valid\n";
+        currentData.forEach((entry, index) => {
+            const dateStr = entry.date ? new Date(entry.date).toISOString() : '';
+            const expectedSig = generateSignature(entry.name, entry.score);
+            const isValid = entry.signature === expectedSig;
+            const row = [index + 1, `"${entry.name.replace(/"/g, '""')}"`, entry.score, dateStr, entry.signature || 'N/A', isValid ? 'TRUE' : 'FALSE'];
+            csvContent += row.join(",") + "\n";
+        });
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `debug_rank_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    // Auto Load
+    loadData();
+</script>
+
+</body>
+</html>
